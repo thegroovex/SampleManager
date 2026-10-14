@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          - name: Windows
+            os: windows-latest
+            cmake_args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        shell: bash
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSM_BUILD_TESTS=OFF ${{ matrix.cmake_args }}
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release --parallel 4
+      - name: Package
+        shell: bash
+        run: |
+          ART=build/SampleManager_artefacts/Release
+          mkdir -p "pkg/SampleManager"
+          cp -R "$ART/Standalone/"* pkg/SampleManager/
+          cp -R "$ART/VST3/"* pkg/SampleManager/
+          if [ -d "$ART/AU" ]; then cp -R "$ART/AU/"* pkg/SampleManager/; fi
+          cp README.md README.en.md LICENSE pkg/SampleManager/
+          cd pkg
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a ../SampleManager-${{ github.ref_name }}-${{ matrix.name }}.zip SampleManager
+          else
+            ditto -c -k --keepParent SampleManager ../SampleManager-${{ github.ref_name }}-${{ matrix.name }}.zip
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: SampleManager-*.zip
