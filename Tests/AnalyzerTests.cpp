@@ -104,6 +104,17 @@ struct AnalyzerTests : juce::UnitTest
             // half/double tempo is musically equivalent but we want the exact value here
             expectWithinAbsoluteError (r.bpm, bpm, 0.5);
         }
+        beginTest ("4-bar loop with a sustained bass");
+        {
+            auto b = test::drumLoop (132.0, 4, sr);
+            auto bass = test::pluck (38, b.getNumSamples() / sr, sr);
+            for (int i = 0; i < b.getNumSamples(); ++i) { b.addSample (0, i, 0.25f * bass.getSample (0, i) / 0.6f); b.addSample (1, i, 0.25f * bass.getSample (0, i) / 0.6f); }
+            double er = 0, gs = 0;
+            auto on = AudioAnalyzer::onsetEnvelope (b.getReadPointer (0), b.getNumSamples(), sr, er);
+            const double gb = AudioAnalyzer::tempoFromBeatGrid (on, er, b.getNumSamples() / sr, &gs);
+            auto r = AudioAnalyzer::analyse (b, sr, {});
+            expectWithinAbsoluteError (r.bpm, 132.0, 0.5, "grid " + juce::String (gb) + " score " + juce::String (gs, 3));
+        }
         beginTest ("filename hints override detection");
         {
             auto b = test::drumLoop (120.0, 1, sr);

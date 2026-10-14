@@ -148,6 +148,10 @@ SampleManagerEditor::SampleManagerEditor (SampleManagerProcessor& p)
     };
 
     restoreUiState();
+    // remember the library state we display, so any later change (scanner, other instances) triggers a refresh
+    lastDataVersion = db.dataVersion();
+    lastLocalVersion = db.localVersion();
+    lastBatch = proc.getScanner().getBatchCounter();
     refreshLibraryViews();
     runSearch (false);
     if (proc.hasSelection())
@@ -233,7 +237,7 @@ void SampleManagerEditor::queryEdited()
 void SampleManagerEditor::updateTabs()
 {
     juce::StringArray titles;
-    for (auto& t : tabs) titles.add (t.describe());
+    for (auto& t : tabs) titles.add (TRANS (t.describe()));
     searchBar.tabs.setTabs (titles, currentTab);
 }
 
@@ -552,13 +556,9 @@ void SampleManagerEditor::timerCallback()
     const auto bc = proc.getScanner().getBatchCounter();
     if (dv != lastDataVersion || lv != lastLocalVersion || bc != lastBatch)
     {
-        const bool first = lastDataVersion < 0;
         lastDataVersion = dv; lastLocalVersion = lv; lastBatch = bc;
-        if (! first)
-        {
-            refreshLibraryViews();
-            if (! showingSpecialList) runSearch (true);
-        }
+        refreshLibraryViews();
+        if (! showingSpecialList) runSearch (true);
     }
 
     auto prog = proc.getScanner().getProgress();

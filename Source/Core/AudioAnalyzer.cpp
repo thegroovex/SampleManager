@@ -288,6 +288,7 @@ double AudioAnalyzer::tempoFromBeatGrid (const std::vector<double>& onset, doubl
     double best = 0, bestScore = -1;
     int bestBeats = 0;
     std::map<int, std::pair<double, double>> shares; // beats -> (share, score)
+    std::map<int, std::vector<double>> pointEnergy;  // beats -> onset energy at each grid point
     for (auto beats : beatCounts)
     {
         const double bpm = 60.0 * beats / seconds;
@@ -295,11 +296,15 @@ double AudioAnalyzer::tempoFromBeatGrid (const std::vector<double>& onset, doubl
         const double framesPerBeat = envRate * 60.0 / bpm;
         std::vector<char> used ((size_t) n, 0);
         double captured = 0; int covered = 0;
+        auto& pts = pointEnergy[beats];
         for (int b = 0; b < beats; ++b)
         {
             const int centre = (int) std::llround (b * framesPerBeat);
+            double e = 0;
             for (int i = centre - w; i <= centre + w; ++i)
-                if (i >= 0 && i < n && ! used[(size_t) i]) { used[(size_t) i] = 1; captured += onset[(size_t) i] * onset[(size_t) i]; ++covered; }
+                if (i >= 0 && i < n && ! used[(size_t) i]) { used[(size_t) i] = 1; e += onset[(size_t) i] * onset[(size_t) i]; ++covered; }
+            captured += e;
+            pts.push_back (e);
         }
         const double share = captured / total;
         const double chance = (double) covered / n;
@@ -310,11 +315,20 @@ double AudioAnalyzer::tempoFromBeatGrid (const std::vector<double>& onset, doubl
     }
     // Half-time check: if the extra (off-beat) grid points of the faster tempo only catch
     // weak onsets such as eighth-note hats, the slower tempo is the musical one (90, not 180).
+    // Medians (without the downbeat) keep one big transient, e.g. a bass attack on beat 1, from deciding.
+    auto median = [] (std::vector<double> v)
+    {
+        if (v.empty()) return 0.0;
+        std::nth_element (v.begin(), v.begin() + (long) v.size() / 2, v.end());
+        return v[v.size() / 2];
+    };
     while (bestBeats % 2 == 0 && shares.count (bestBeats / 2) > 0)
     {
-        const auto onShare  = shares[bestBeats / 2].first;
-        const auto offShare = shares[bestBeats].first - onShare;
-        if (offShare >= 0.5 * onShare) break;
+        const auto& pts = pointEnergy[bestBeats];
+        std::vector<double> on, off;
+        for (size_t i = 1; i < pts.size(); ++i) (i % 2 == 0 ? on : off).push_back (pts[i]); // skip the downbeat
+        const double mOn = median (on), mOff = median (off);
+        if (on.empty() || mOff >= 0.6 * mOn) break;
         bestBeats /= 2;
         best = 60.0 * bestBeats / seconds;
         bestScore = shares[bestBeats].second;
