@@ -4,10 +4,45 @@ on:
   push:
     branches: [ main ]
   pull_request:
+    types: [ opened, synchronize, reopened, labeled ]
   workflow_dispatch:
 
+# A new push cancels the previous run of the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'Source/**'
+              - 'Tests/**'
+              - 'Resources/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+              - '.github/workflows/**'
+
+  docs-only:
+    name: Docs only
+    needs: changes
+    if: needs.changes.outputs.code != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Only docs changed - builds skipped."
+
   build:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +58,9 @@ jobs:
             cmake_args: ""
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 800M
     steps:
       - uses: actions/checkout@v4
 
@@ -30,32 +68,94 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libx11-dev libxrandr-dev libxinerama-dev \
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxext-dev libxcomposite-dev libfreetype-dev libfontconfig1-dev
+
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja || true
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-${{ matrix.name }}-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}
+          restore-keys: ccache-${{ matrix.name }}-${{ runner.arch }}-
+          max-size: 800M
+
+      # Sources of the FetchContent deps (JUCE, SoundTouch, SQLite, Link) are cached;
+      # build/subbuild dirs are not, so the cache never carries stale absolute paths.
+      - name: Dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .deps/juce-src
+            .deps/soundtouch-src
+            .deps/sqlite-src
+            .deps/link-src
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
 
       - name: Configure
         shell: bash
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_args }}
+        run: |
+          EXTRA=""
+          for d in juce soundtouch sqlite link; do
+            U=$(echo $d | tr a-z A-Z)
+            if [ -d ".deps/$d-src" ] && [ -n "$(ls -A .deps/$d-src)" ]; then
+              EXTRA="$EXTRA -DFETCHCONTENT_SOURCE_DIR_$U=$PWD/.deps/$d-src"
+            fi
+          done
+          echo "Cached deps: $EXTRA"
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DFETCHCONTENT_BASE_DIR="$PWD/.deps" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            $EXTRA ${{ matrix.cmake_args }}
 
       - name: Build
         shell: bash
-        run: cmake --build build --config Release --parallel 4
+        run: cmake --build build --parallel 4
 
+      # The test suite is one fast binary (seconds), so it runs right here;
+      # shipping the build tree to separate shard jobs would cost more than it saves.
       - name: Unit tests
         shell: bash
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build --output-on-failure
 
+      - name: ccache stats
+        shell: bash
+        run: ccache -s || true
+
+      # Downloadable binaries only on main or with the "installer" label.
       - name: Collect artefacts
+        if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'installer')
         shell: bash
         run: |
           mkdir -p dist
           ART=build/SampleManager_artefacts/Release
+          [ -d "$ART" ] || ART=build/SampleManager_artefacts
           cp -R "$ART/Standalone/"* dist/ 2>/dev/null || true
           cp -R "$ART/VST3/"* dist/ 2>/dev/null || true
           if [ -d "$ART/AU" ]; then cp -R "$ART/AU/"* dist/; fi
           ls -la dist
 
       - uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'installer')
         with:
           name: SampleManager-${{ matrix.name }}
           path: dist
+          retention-days: 3
+
+  result:
+    name: CI result
+    if: always()
+    needs: [ changes, docs-only, build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate
+        run: |
+          echo "changes=${{ needs.changes.result }} docs=${{ needs.docs-only.result }} build=${{ needs.build.result }}"
+          if [ "${{ needs.changes.result }}" != "success" ]; then exit 1; fi
+          case "${{ needs.build.result }}" in failure|cancelled) exit 1;; esac
